@@ -2,9 +2,9 @@ import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
+import os
 
-
-def plot_history(metrics):
+def plot_history(metrics, epoch=1, metrics_dir="Metrics/"):
     """
     Plot evoluction of training and validation loss over the training period.
     :param metrics: dictionary containing training and validation loss
@@ -45,12 +45,14 @@ def plot_history(metrics):
             ax.set_xticks(ticks)
             ax.set_xticklabels(labels)
             ax.plot(val_loss)
-
-    plt.show()
+    save_path = os.path.join(metrics_dir, 'metrics_{}.png'.format(epoch))
+    plt.savefig(save_path)
+    # plt.show()
 
 
 if __name__ == '__main__':
-
-    metrics = np.load('Metrics/metrics_17.npz', allow_pickle=True)['history'].item()
-    plot_history(metrics)
+    epoch = 25
+    metrics_dir = "Ori_Model/Metrics/"
+    metrics = np.load(metrics_dir + 'metrics_{}.npz'.format(epoch), allow_pickle=True)['history'].item()
+    plot_history(metrics, epoch=epoch, metrics_dir=metrics_dir)
 

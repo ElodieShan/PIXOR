@@ -3,13 +3,15 @@ from PIXOR import PIXOR
 from shapely.geometry import Polygon
 from config import *
 from scipy.linalg import block_diag
-
+import torch.nn as nn
+import pickle
+torch.multiprocessing.set_start_method('spawn', force="True")
 
 #######################
 # reshape predictions #
 #######################
 
-def process_regression_target(valid_reg_predictions, validity_mask):
+def process_regression_target(valid_reg_predictions, validity_mask, return_boxes=False):
     """
         Convert the raw regression prediction into camera coordinates of a bounding box.
         :param valid_reg_predictions: raw regression output | shape: [N_VALID, OUTPUT_DIM_REG]
@@ -53,6 +55,10 @@ def process_regression_target(valid_reg_predictions, validity_mask):
     corners = np.dot(block_rot_matrix, corners).reshape(-1, 8)
     # translate the bounding boxes
     point_cloud_box_predictions = corners + centers
+    
+    if return_boxes:
+        bev_boxes_predictions = np.hsatck((centers, width, length, prediction_angles))
+        return point_cloud_box_predictions, bev_boxes_predictions
 
     return point_cloud_box_predictions
 
@@ -61,7 +67,7 @@ def process_regression_target(valid_reg_predictions, validity_mask):
 # non-maximum suppression #
 ##########################
 
-def perform_nms(valid_class_predictions, valid_box_predictions, nms_threshold):
+def perform_nms(valid_class_predictions, valid_box_predictions, nms_threshold, bev_boxes_predictions=None):
     """
         Perform Non-Maximum Suppression to eliminate overlapping predictions.
         :param valid_class_predictions: all confidence scores higher than the threshold | shape: [N_VALID, ]
@@ -75,6 +81,9 @@ def perform_nms(valid_class_predictions, valid_box_predictions, nms_threshold):
     sorted_indices = np.argsort(valid_class_predictions)[::-1]
     sorted_box_predictions = valid_box_predictions[sorted_indices]
     sorted_class_predictions = valid_class_predictions[sorted_indices]
+
+    if bev_boxes_predictions is not None:
+        sorted_bev_boxes_predictions = bev_boxes_predictions[sorted_indices]
 
     for i in range(sorted_box_predictions.shape[0]):
         # get the IOUs of all boxes with the currently most certain bounding box
@@ -90,7 +99,11 @@ def perform_nms(valid_class_predictions, valid_box_predictions, nms_threshold):
         overlap_mask = np.where(ious < nms_threshold, True, False)
         sorted_box_predictions = sorted_box_predictions[overlap_mask]
         sorted_class_predictions = sorted_class_predictions[overlap_mask]
+        if bev_boxes_predictions is not None:
+            sorted_bev_boxes_predictions = sorted_bev_boxes_predictions[overlap_mask]
 
+    if bev_boxes_predictions is not None:
+        return sorted_class_predictions, sorted_box_predictions, sorted_bev_boxes_predictions
     return sorted_class_predictions, sorted_box_predictions
 
 
@@ -135,7 +148,7 @@ def bbox_iou(box1, boxes):
 # process predictions #
 #######################
 
-def process_predictions(batch_predictions, confidence_threshold=0.2, nms_threshold=0.05):
+def process_predictions(batch_predictions, confidence_threshold=0.2, nms_threshold=0.05, return_boxes=False):
     """
     Process the raw network output into thresholded and non-overlapping final bounding box predictions for all samples in
     the batch.
@@ -171,12 +184,19 @@ def process_predictions(batch_predictions, confidence_threshold=0.2, nms_thresho
 
         # continue if no valid predictions
         if valid_reg_predictions.shape[0]:
-            valid_box_predictions = process_regression_target(valid_reg_predictions, validity_mask)
+            if return_boxes:
+                valid_box_predictions, bev_boxes_predictions = process_regression_target(valid_reg_predictions, validity_mask, return_boxes=return_boxes)
+            else:
+                valid_box_predictions = process_regression_target(valid_reg_predictions, validity_mask)
         else:
             continue
 
         # perform Non-Maximum Suppression
-        final_class_predictions, final_box_predictions = perform_nms(valid_class_predictions, valid_box_predictions,
+        if return_boxes:
+            final_class_predictions, final_box_predictions, final_bev_boxes_predictions = perform_nms(valid_class_predictions, valid_box_predictions,
+                                                                     nms_threshold, bev_boxes_predictions=bev_boxes_predictions)
+        else:
+            final_class_predictions, final_box_predictions = perform_nms(valid_class_predictions, valid_box_predictions,
                                                                      nms_threshold)
 
         # concatenate point_cloud_id, confidence score and bounding box prediction | shape: [N_FINAL, 1+1+8]
@@ -184,11 +204,15 @@ def process_predictions(batch_predictions, confidence_threshold=0.2, nms_thresho
         final_point_cloud_predictions = np.hstack((point_cloud_ids, final_class_predictions[:, np.newaxis],
                                                    final_box_predictions))
 
-        # stack final predictions for all point clouds in batch
+        if final_bev_boxes_predictions is not None:
+            final_point_cloud_predictions = np.hstack((final_point_cloud_predictions, final_bev_boxes_predictions))
+
+        # stack final predictions for all point cloudss in batch
         if final_batch_predictions is None:
             final_batch_predictions = final_point_cloud_predictions
         else:
             final_batch_predictions = np.vstack((final_batch_predictions, final_point_cloud_predictions))
+
 
     return final_batch_predictions
 
@@ -218,19 +242,26 @@ def evaluate_model(model, data_loader, distance_ranges, iou_thresholds):
     eval_dict = {distance_range: {'targets': {threshold: [] for threshold in iou_thresholds}, 'scores': [], 'n_labels': 0}
                  for distance_range in distance_ranges}
 
+    result_dict_all = []
     # iterate over all batches in test dataset
     for batch_id, (batch_data, batch_labels, batch_calib) in enumerate(data_loader):
 
         with torch.set_grad_enabled(False):
 
             # forward pass
+            
             batch_predictions = model(batch_data)
 
             # convert network output to numpy for further processing
-            batch_predictions = np.transpose(batch_predictions.detach().numpy(), (0, 2, 3, 1))
+            batch_predictions = np.transpose(batch_predictions.detach().cpu().numpy(), (0, 2, 3, 1))
 
             # get final bounding box predictions
             final_box_predictions = process_predictions(batch_predictions)
+
+            result_dict = {
+                "id": batch_id,
+                "final_box_predictions": final_box_predictions,
+            }
 
             # iterate over all point clouds in batch
             for point_cloud_id in range(batch_data.size(0)):
@@ -248,12 +279,15 @@ def evaluate_model(model, data_loader, distance_ranges, iou_thresholds):
                     # only consider annotations for class "Car"
                     if label.type == 'Car':
                         # compute corners of the bounding box
-                        _, bbox_corners_camera_coord = kitti_utils.compute_box_3d(label, batch_calib[id].P)
+                        _, bbox_corners_camera_coord = kitti_utils.compute_box_3d(label, batch_calib[point_cloud_id].P)
                         bbox_corners_camera_coord = np.hstack((bbox_corners_camera_coord[:4, 0], bbox_corners_camera_coord[:4, 2]))
                         if ground_truth_box_corners is None:
-                            ground_truth_box_corners = bbox_corners_camera_coord
+                            ground_truth_box_corners = np.array([bbox_corners_camera_coord])
                         else:
-                            ground_truth_box_corners = np.vstack((ground_truth_box_corners, bbox_corners_camera_coord))
+                            ground_truth_box_corners = np.vstack((ground_truth_box_corners, np.array([bbox_corners_camera_coord])))
+                
+                result_dict["ground_truth_box_corners"] = ground_truth_box_corners
+                result_dict_all.append(result_dict)
 
                 assert np.all(np.diff(distance_ranges) <= 0)  # check that distance ranges monotonically decrease
                 # iterate over all distance ranges
@@ -388,12 +422,17 @@ def evaluate_model(model, data_loader, distance_ranges, iou_thresholds):
         average_precisions = [eval_dict[distance_range][key]['AP'] for key in eval_dict[distance_range] if not isinstance(key, str)]
         eval_dict[distance_range]['mAP'] = sum(average_precisions) / len(average_precisions)
 
-    return eval_dict
+    return eval_dict, result_dict_all
 
 
 if __name__ == '__main__':
 
-    # set device
+    eval_mode = "PR_curve"  # "PR_curve" / "Iou"
+    use_ImageSets = True
+    use_voxelize_density = False 
+    n_epochs_trained = 17
+
+    # set device 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # evaluation parameters
@@ -401,18 +440,37 @@ if __name__ == '__main__':
 
     # create data loader
     root_dir = 'Data/'
-    data_loader = load_dataset(root=root_dir, batch_size=batch_size, device=device, test_set=True)
+    data_loader = load_dataset(root=root_dir, batch_size=batch_size, device=device, test_set=True, \
+            use_voxelize_density=use_voxelize_density, use_ImageSets=use_ImageSets)
 
     # create model
-    pixor = PIXOR()
-    n_epochs_trained = 17
+    pixor = PIXOR().to(device)
     pixor.load_state_dict(torch.load('Models/PIXOR_Epoch_' + str(n_epochs_trained) + '.pt', map_location=device))
 
-    # evaluate model
-    eval_dict = evaluate_model(pixor, data_loader, distance_ranges=[70, 50, 30], iou_thresholds=[0.5, 0.6, 0.7, 0.8, 0.9])
+    if eval_mode == "PR_curve":
+        # evaluate model
+        eval_dict, result_dict_all = evaluate_model(pixor, data_loader, distance_ranges=[70, 50, 30], iou_thresholds=[0.5, 0.6, 0.7, 0.8, 0.9])
 
-    # add identifier to dictionary
-    eval_dict['epoch'] = n_epochs_trained
+        # save result dict elodie
+        result_save_path = os.path.join("Eval", "result_dict_epoch_{}.pkl".format(n_epochs_trained))
+        with open(result_save_path, "wb") as f:
+            pickle.dump(result_dict_all, f)
 
-    # save evaluation dictionary
-    np.savez('eval_dict_epoch_' + str(n_epochs_trained) + '.npz', eval_dict=eval_dict)
+        # add identifier to dictionary
+        eval_dict['epoch'] = n_epochs_trained
+
+        # save evaluation dictionary
+        np.savez('Eval/eval_dict_epoch_' + str(n_epochs_trained) + '.npz', eval_dict=eval_dict)
+    elif eval_mode == "Iou":
+        iou_thred = (np.linspace(0,10,21)/10.0).tolist()
+        print("iou_thred:",iou_thred)
+        eval_dict_iou, _ = evaluate_model(pixor, data_loader, distance_ranges=[70], iou_thresholds=iou_thred[1:-1])
+
+        # add identifier to dictionary
+        eval_dict_iou['epoch'] = n_epochs_trained
+
+        # save evaluation dictionary
+        np.savez('Eval/eval_iou_dict_epoch_' + str(n_epochs_trained) + '.npz', eval_dict=eval_dict_iou)
+
+        
+    # CUDA_VISIBLE_DEVICES=6 python3 evaluate_model.py

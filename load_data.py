@@ -5,7 +5,7 @@ import cv2
 import kitti_utils
 from config import *
 import time
-
+import ctypes
 
 ############################
 # custom collate functions #
@@ -23,12 +23,19 @@ def my_collate_test(batch):
     point_clouds = []
     labels = []
     calibs = []
+    training_labels = []
+    tuple_shape = 3
     for tuple_id, tuple in enumerate(batch):
         point_clouds.append(tuple[0])
         labels.append(tuple[1])
         calibs.append(tuple[2])
+        if len(tuple)>3:
+            tuple_shape = len(tuple)
+            training_labels.append(tuple[3])
 
     point_clouds = torch.stack(point_clouds)
+    if tuple_shape>3:
+        return point_clouds, labels, calibs, training_labels
     return point_clouds, labels, calibs
 
 
@@ -125,7 +132,8 @@ class PointCloudDataset(Dataset):
     Characterizes a dataset for PyTorch
     """
 
-    def __init__(self, root_dir, split='training', device=torch.device('cpu'), show_times=True, get_image=False):
+    def __init__(self, root_dir, split='training', device=torch.device('cpu'), show_times=True, get_image=False, \
+                        use_voxelize_density=False, use_ImageSets=False, get_training_label_when_test=False):
         """
         Dataset for training and testing containing point cloud, calibration object and in case of training labels
         :param root_dir: root directory of the dataset
@@ -137,19 +145,36 @@ class PointCloudDataset(Dataset):
         self.show_times = show_times  # debug
         self.get_image = get_image  # load camera image
 
+        self.use_ImageSets = use_ImageSets
         self.device = device
         self.root_dir = root_dir
         self.split = split
-        self.split_dir = os.path.join(root_dir, split)
+        # self.split_dir = os.path.join(root_dir, split)
+        self.split_dir = os.path.join(root_dir, 'training')
+        # self.LidarLib = ctypes.cdll.LoadLibrary('preprocess/LidarPreprocess.so')
+        self.get_training_label_when_test = get_training_label_when_test
+        print("get_training_label_when_test:",get_training_label_when_test)
 
-        if split == 'training':
-            self.num_samples = 6481
-        elif split == 'testing':
-            self.num_samples = 1000
+        if self.use_ImageSets:
+            if split == 'training':
+                self.num_samples = 3712
+                self.trainset_list = self.load_imageset(is_train=True)
+            elif split == 'testing' or split == 'val':
+                self.num_samples = 3769
+                self.val_list = self.load_imageset(is_train=False)
+            else:
+                print('Unknown split: %s' % (split))
+                exit(-1)
         else:
-            print('Unknown split: %s' % split)
-            exit(-1)
+            if split == 'training':
+                self.num_samples = 6481
+            elif split == 'testing':
+                self.num_samples = 1000
+            else:
+                print('Unknown split: %s' % (split))
+                exit(-1)
 
+        self.use_voxelize_density = use_voxelize_density
         # paths to camera, lidar, calibration and label directories
         self.lidar_dir = os.path.join(self.split_dir, 'velodyne')
         self.calib_dir = os.path.join(self.split_dir, 'calib')
@@ -160,13 +185,53 @@ class PointCloudDataset(Dataset):
         # Denotes the total number of samples
         return self.num_samples
 
-    def __getitem__(self, index):
+    def get_file_index(self, idx):
+        if self.use_ImageSets:
+            if self.split == "training":
+                file_index = self.trainset_list[idx]
+            elif self.split == 'testing' or self.split == 'val':
+                file_index = self.val_list[idx]
+        else:
+            if self.split == "training":
+                file_index = idx
+            elif self.split == 'testing':
+                file_index = 6481 + idx
+        return file_index
 
+    def get_top_view_maps(self, points):
+        scan = np.zeros((INPUT_DIM_0,INPUT_DIM_1,INPUT_DIM_2), dtype=np.float32)
+        c_data = ctypes.c_void_p(scan.ctypes.data)
+        c_points = ctypes.c_void_p(points.ctypes.data)
+        num = points.shape[0]
+        ctypes.cdll.LoadLibrary('preprocess/LidarPreprocess.so').createTopViewMapsfromPoints(c_data, c_points, num)
+        return scan
+
+    def get_top_view_density_maps(self, points):
+        scan = np.zeros((INPUT_DIM_0,INPUT_DIM_1,INPUT_DIM_2), dtype=np.float32)
+        c_data = ctypes.c_void_p(scan.ctypes.data)
+        c_points = ctypes.c_void_p(points.ctypes.data)
+        num = points.shape[0]
+        ctypes.cdll.LoadLibrary('preprocess/LidarPreprocess.so').createTopViewDensityMapsfromPoints(c_data, c_points, num)
+        return scan
+        
+    def get_top_view_maps_from_file(self, filename):
+        c_name = bytes(filename, 'utf-8')
+        scan = np.zeros((INPUT_DIM_0,INPUT_DIM_1,INPUT_DIM_2), dtype=np.float32)
+        # print(scan.shape)
+        c_data = ctypes.c_void_p(scan.ctypes.data)
+        ctypes.cdll.LoadLibrary('preprocess/LidarPreprocess.so').createTopViewMaps(c_data, c_name)
+        return scan
+
+    def __getitem__(self, index):
+        
         # start time
         get_item_start_time = time.time()
 
+        # elodie
+        file_index = self.get_file_index(index)
+
         # get point cloud
-        lidar_filename = os.path.join(self.lidar_dir, '%06d.bin' % index)
+        lidar_filename = os.path.join(self.lidar_dir, '%06d.bin' % file_index)
         lidar_data = kitti_utils.load_velo_scan(lidar_filename)
 
         # time for loading point cloud
@@ -174,8 +239,14 @@ class PointCloudDataset(Dataset):
         read_point_cloud_time = read_point_cloud_end_time - get_item_start_time
 
         # voxelize point cloud
-        voxel_point_cloud = torch.tensor(kitti_utils.voxelize(point_cloud=lidar_data), requires_grad=True, device=self.device).float()
-
+        # voxel_point_cloud = torch.tensor(kitti_utils.voxelize(point_cloud=lidar_data), requires_grad=True, device=self.device).float()
+        if self.use_voxelize_density:
+            # voxel_point_cloud = torch.from_numpy(kitti_utils.voxelize_density(point_cloud = lidar_data)).to(self.device)
+            voxel_point_cloud = torch.from_numpy(self.get_top_view_density_maps(lidar_data)).to(self.device)
+        else:
+            # voxel_point_cloud = torch.from_numpy(self.get_top_view_maps_from_file(lidar_filename)).to(self.device)
+            # voxel_point_cloud = torch.from_numpy(kitti_utils.voxelize(point_cloud = lidar_data)).to(self.device)
+            voxel_point_cloud = torch.from_numpy(self.get_top_view_maps(lidar_data)).to(self.device)
         # time for voxelization
         voxelization_end_time = time.time()
         voxelization_time = voxelization_end_time - read_point_cloud_end_time
@@ -185,25 +256,25 @@ class PointCloudDataset(Dataset):
 
         # get image
         if self.get_image:
-            image_filename = os.path.join(self.image_dir, '%06d.png' % index)
+            image_filename = os.path.join(self.image_dir, '%06d.png' % file_index)
             image = kitti_utils.get_image(image_filename)
 
         # get current time
         read_labels_start_time = time.time()
 
         # get calibration
-        calib_filename = os.path.join(self.calib_dir, '%06d.txt' % index)
+        calib_filename = os.path.join(self.calib_dir, '%06d.txt' % file_index)
         calib = kitti_utils.Calibration(calib_filename)
 
         # get labels
-        label_filename = os.path.join(self.label_dir, '%06d.txt' % index)
+        label_filename = os.path.join(self.label_dir, '%06d.txt' % file_index)
         labels = kitti_utils.read_label(label_filename)
 
         read_labels_end_time = time.time()
         read_labels_time = read_labels_end_time - read_labels_start_time
 
         # compute network label
-        if self.split == 'training':
+        if self.split == 'training' or self.split == 'val':
             # get current time
             compute_label_start_time = time.time()
 
@@ -241,22 +312,62 @@ class PointCloudDataset(Dataset):
                 print('Voxelization Time: {:.4f} s'.format(voxelization_time))
                 print('Read Labels Time: {:.4f} s'.format(read_labels_time))
                 print('Compute Labels Time: {:.4f} s'.format(compute_label_time))
-
             return voxel_point_cloud, training_label
+    
 
         else:
             if self.get_image:
                 return image, voxel_point_cloud, labels, calib
             else:
-                return voxel_point_cloud, labels, calib
+                if self.get_training_label_when_test:
+                    print("OK!")
+                    # create empty pixel labels
+                    regression_label = np.zeros((OUTPUT_DIM_0, OUTPUT_DIM_1, OUTPUT_DIM_REG))
+                    classification_label = np.zeros((OUTPUT_DIM_0, OUTPUT_DIM_1, OUTPUT_DIM_CLA))
+                    # iterate over all 3D label objects in list
+                    for label in labels:
+                        if label.type == 'Car':
+                            # compute corners of 3D bounding box in camera coordinates
+                            _, bbox_corners_camera_coord = kitti_utils.compute_box_3d(label, calib.P, scale=1.0)
+                            # get pixel label for classification and BEV bounding box
+                            regression_label, classification_label = compute_pixel_labels\
+                                (regression_label, classification_label, label, bbox_corners_camera_coord)
+                    # stack classification and regression label
+                    regression_label = torch.tensor(regression_label, device=self.device).float()
+                    classification_label = torch.tensor(classification_label, device=self.device).float()
+                    training_label = torch.cat((regression_label, classification_label), dim=2)
+                    return voxel_point_cloud, labels, calib, training_label
+                else:
+                    return voxel_point_cloud, labels, calib
 
+    def load_imageset(self, is_train=True):
+            path = "ImageSets"
+            if is_train:
+                path = os.path.join(path, "train.txt")
+            else:
+                path = os.path.join(path, "val.txt")
+
+            with open(path, 'r') as f:
+                lines = f.readlines() # get rid of \n symbol
+                names = []
+                for line in lines[:-1]:
+                    if int(line[:-1]) < 7482:
+                        names.append(int(line[:-1]))
+
+                # Last line does not have a \n symbol
+                names.append(int(lines[-1][:6]))
+                # print(names[-1])
+                print("There are {} images in txt file".format(len(names)))
+
+                return names
 
 #################
 # load datasets #
 #################
 
 def load_dataset(root='Data/', batch_size=1, train_val_split=0.9, test_set=False,
-                 device=torch.device('cpu'), show_times=False):
+                 device=torch.device('cpu'), show_times=False, \
+                 use_voxelize_density=False, use_ImageSets=False, get_training_label_when_test=False):
     """
     Create a data loader that reads in the data from a directory of png-images
     :param device: device of the model
@@ -270,15 +381,15 @@ def load_dataset(root='Data/', batch_size=1, train_val_split=0.9, test_set=False
 
     # speed up data loading on gpu
     if device != torch.device('cpu'):
-        num_workers = 0
+        num_workers = 4
     else:
         num_workers = 0
-
+    print("num_workers:",num_workers)
     # create training and validation set
     if not test_set:
-
         # create customized dataset class
-        dataset = PointCloudDataset(root_dir=root, device=device, split='training', show_times=show_times)
+        dataset = PointCloudDataset(root_dir=root, device=device, split='training', show_times=show_times, \
+                            use_voxelize_density=use_voxelize_density, use_ImageSets=use_ImageSets)
 
         # number of images used for training and validation
         n_images = dataset.__len__()
@@ -295,11 +406,11 @@ def load_dataset(root='Data/', batch_size=1, train_val_split=0.9, test_set=False
             'val': DataLoader(val_dataset, batch_size=batch_size, shuffle=True, collate_fn=my_collate_train,
                               num_workers=num_workers)
         }
-
     # create test set
     else:
 
-        test_dataset = PointCloudDataset(root_dir=root, device=device, split='testing')
+        test_dataset = PointCloudDataset(root_dir=root, device=device, split='testing', \
+        use_voxelize_density=use_voxelize_density, use_ImageSets=use_ImageSets, get_training_label_when_test=get_training_label_when_test)
         data_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=my_collate_test,
                                  num_workers=num_workers, drop_last=True)
 
@@ -312,7 +423,14 @@ if __name__ == '__main__':
     root_dir = 'Data/'
     batch_size = 1
     device = torch.device('cpu')
-    data_loader = load_dataset(root=root_dir, batch_size=batch_size, device=device, show_times=True)['train']
 
-    for batch_id, (batch_data, batch_labels) in enumerate(data_loader):
-        pass
+    # data_loader = load_dataset(root=root_dir, batch_size=batch_size, device=device, show_times=True)
+    # for batch_id, (batch_data, batch_labels) in enumerate(data_loader['val']):
+    #     print("batch_id:",batch_id,"\nbatch_data:",batch_data[batch_data>0])
+
+    # Test
+    data_loader = load_dataset(root=root_dir, batch_size=batch_size, device=device, test_set=True)
+
+    for batch_id, (batch_data, batch_labels, batch_calib) in enumerate(data_loader):
+        print("batch_id:",batch_id,"\nbatch_data:",batch_data[batch_data>0], "\nbatch_calib:",batch_calib)
+        

@@ -1,5 +1,5 @@
 from evaluate_model import *
-
+import os
 ###############
 # show legend #
 ###############
@@ -43,8 +43,13 @@ if __name__ == '__main__':
     in a BEV image and the original camera image.
     """
 
+    model_dir = "Ori_Model/"
+    det_res_save_dir = model_dir + "Images/Detections/"
     # root directory of the dataset
     root_dir = 'Data/'
+
+    if not os.path.exists(det_res_save_dir):
+        os.makedirs(det_res_save_dir)
 
     # device
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -52,18 +57,19 @@ if __name__ == '__main__':
     # create dataset
     dataset = PointCloudDataset(root_dir, split='testing', get_image=True)
 
+    # create model
+    pixor = PIXOR()
+    n_epochs_trained = 18
+    pixor.load_state_dict(torch.load(model_dir + 'Models/PIXOR_Epoch_' + str(n_epochs_trained) + '.pt', map_location=device))
+
     # select index from dataset
-    ids = np.arange(0, dataset.__len__())
+    # ids = np.arange(0, dataset.__len__())
+    ids = np.arange(0, 5)
 
     for id in ids:
 
         # get image, point cloud, labels and calibration
         camera_image, point_cloud, labels, calib = dataset.__getitem__(id)
-
-        # create model
-        pixor = PIXOR()
-        n_epochs_trained = 17
-        pixor.load_state_dict(torch.load('Models/PIXOR_Epoch_' + str(n_epochs_trained) + '.pt', map_location=device))
 
         # unsqueeze first dimension for batch
         point_cloud = point_cloud.unsqueeze(0)
@@ -75,7 +81,8 @@ if __name__ == '__main__':
         predictions = np.transpose(predictions.detach().numpy(), (0, 2, 3, 1))
 
         # get final bounding box predictions
-        final_box_predictions = process_predictions(predictions, confidence_threshold=0.5)
+        final_box_predictions = process_predictions(predictions) #elodie
+        # final_box_predictions = process_predictions(predictions, confidence_threshold=0.5)
 
         ###################
         # display results #
@@ -132,4 +139,8 @@ if __name__ == '__main__':
 
         # save image
         print('Index: ', id)
-        cv2.imwrite('Images/Detections/detection_id_{:d}.png'.format(id), bev_image)
+        
+
+        cv2.imwrite('{}detection_id_{:d}.png'.format(det_res_save_dir, id), bev_image)
+        
+        # CUDA_VISIBLE_DEVICES=2 python3 detector.py

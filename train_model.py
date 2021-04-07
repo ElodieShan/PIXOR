@@ -3,11 +3,12 @@ from load_data import *
 from PIXOR import PIXOR
 import torch.nn as nn
 import time
-
+from tqdm import tqdm
 ##################
 # early stopping #
 ##################
 
+torch.multiprocessing.set_start_method('spawn', force="True")
 
 class EarlyStopping:
     """
@@ -160,8 +161,9 @@ def train_model(model, optimizer, scheduler, data_loaders, n_epochs=25, show_tim
     early_stopping = EarlyStopping(patience=8, verbose=True)
 
     # moving loss
-    moving_loss = {'train': metrics['train_loss'][-1], 'val': metrics['val_loss'][-1]}
-
+    # moving_loss = {'train': metrics['train_loss'][-1], 'val': metrics['val_loss'][-1]}
+    moving_loss = {'train': None, 'val': None}
+    print("Start training...")
     # epochs
     for epoch in range(n_epochs):
 
@@ -174,7 +176,7 @@ def train_model(model, optimizer, scheduler, data_loaders, n_epochs=25, show_tim
             else:
                 model.eval()  # Set model to evaluate mode
 
-            for batch_id, (batch_data, batch_labels) in enumerate(data_loaders[phase]):
+            for batch_id, (batch_data, batch_labels) in enumerate(tqdm(data_loaders[phase])):
 
                 # zero the parameter gradients
                 optimizer.zero_grad()
@@ -250,27 +252,34 @@ def train_model(model, optimizer, scheduler, data_loaders, n_epochs=25, show_tim
 
 if __name__ == '__main__':
 
+    use_voxelize_density = False # whether use th density mode in voxelization
+    use_ImageSets = True # the train/val split mode.  True - dataset split 5:5, False - dataset split 9:1 
+
     # set device
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # training parameters
     n_epochs = 30
-    batch_size = 6
-    initial_learning_rate = 1e-3
+    batch_size = 2
+    initial_learning_rate = 3e-4
 
     # create data loader
     root_dir = 'Data/'
-    data_loader = load_dataset(root=root_dir, batch_size=batch_size, device=device)
-
+    data_loader = load_dataset(root=root_dir, batch_size=batch_size, device=device, \
+                    use_voxelize_density=use_voxelize_density, use_ImageSets=use_ImageSets)
+    print("Successfully create data loader.")
     # create model
     pixor = PIXOR().to(device)
+    print("Successfully create model.")
 
     # create optimizer and scheduler objects
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, pixor.parameters()), lr=initial_learning_rate)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [10, 20], gamma=0.1)
+    print("Start.")
 
     # train model
     history = train_model(pixor, optimizer, scheduler, data_loader, n_epochs=n_epochs)
 
     # save training history
-    np.savez('history.npz', history=history)
+    np.savez('./Metrics/history.npz', history=history)
+    # CUDA_VISIBLE_DEVICES=6 python3 train_model.py

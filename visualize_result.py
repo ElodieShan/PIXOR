@@ -2,7 +2,7 @@ from load_data import *
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
-
+import pickle
 ##################
 # dataset object #
 ##################
@@ -94,6 +94,17 @@ if __name__ == '__main__':
     # root directory of the dataset
     root_dir = 'Data/'
 
+    epoch = 18
+    eval_path = os.path.join("Eval", "result_dict_epoch_{}.pkl".format(epoch))
+
+    result_save_dir = os.path.join("Eval", "Figures", str(epoch))
+    if not os.path.exists(result_save_dir):
+        os.makedirs(result_save_dir)
+
+    with open(eval_path, "rb") as f:
+        result_dict_list = pickle.load(f)
+
+    
     # create dataset
     train_dataset = KittiObject(root_dir)
 
@@ -103,7 +114,7 @@ if __name__ == '__main__':
 
     # loop over random selection
     for id in ids:
-
+        result_dict = result_dict_list[id]
         # get image, point cloud, labels and calibration
         image = train_dataset.get_image(idx=id)
         labels = train_dataset.get_label_objects(idx=id)
@@ -126,6 +137,17 @@ if __name__ == '__main__':
             if label.type == 'Car':
                 # compute corners of the bounding box
                 bbox_corners_image_coord, bbox_corners_camera_coord = kitti_utils.compute_box_3d(label, calib.P)
+                # print("bbox_corners_camera_coord:", bbox_corners_camera_coord)
+                # gt = result_dict["ground_truth_box_corners"]
+                # print("ground_truth_box_corners.reshape(4,2):", gt.reshape(gt.shape[0],4,2))
+                # print("ground_truth_box_corners.reshape(2,4):", gt.reshape(gt.shape[0],2,4).transpose(0,2,1))
+                # pred = result_dict["final_box_predictions"]
+                # print("final_box_predictions:",pred[:,2:].reshape(pred.shape[0],2,4).transpose(0,2,1))
+                # pred_boxes = pred[:,2:].reshape(pred.shape[0],2,4).transpose(0,2,1)
+                # pred_scores = pred[:,1]
+                
+
+                # print("final_box_predictions:",pred.reshape(pred.shape[0],2,4).transpose(0,2,1))
                 # draw BEV bounding box on BEV image
                 bev_image = kitti_utils.draw_projected_box_bev(bev_image, bbox_corners_camera_coord)
                 # create labels
@@ -134,6 +156,16 @@ if __name__ == '__main__':
                 # draw 3D bounding box on image
                 if bbox_corners_image_coord is not None:
                     image = kitti_utils.draw_projected_box_3d(image, bbox_corners_image_coord)
+
+        pred = result_dict["final_box_predictions"]
+        if pred is not None:
+            pred_boxes = pred[:,2:].reshape(pred.shape[0],2,4).transpose(0,2,1)
+            pred_scores = pred[:,1]
+            # print("pred_scores:",pred_scores)
+            for i in range(pred_scores.shape[0]):
+                pred_score = pred_scores[i]
+                pred_box = pred_boxes[i]
+                bev_image = kitti_utils.draw_projected_box_bev(bev_image, pred_box, confidence_score=pred_score, color=(0, 0, 255))
 
         # create binary mask from relevant pixels in label
         label_mask = np.where(np.sum(np.abs(regression_label), axis=2) > 0, 255, 0).astype(np.uint8)
@@ -173,11 +205,11 @@ if __name__ == '__main__':
         # cv2.imshow('Label Mask', c)
         # cv2.imshow('Image', image)
         # cv2.imshow('Image_BEV', bev_image)
-        if not os.path.exists(os.path.join("Eval", "KITTI")):
-            os.makedirs(os.path.join("Eval", "KITTI"))
-        bev_image_save_path = os.path.join("Eval", "KITTI","{}.png".format(id))
+
+
+        bev_image_save_path = os.path.join(result_save_dir,"{}.png".format(id))
         cv2.imwrite(bev_image_save_path, bev_image)
-        label_mask_save_path = os.path.join("Eval", "KITTI","{}_label_mask.png".format(id))
-        cv2.imwrite(label_mask_save_path, label_mask)
+        # label_mask_save_path = os.path.join("Eval", "KITTI","{}_label_mask.png".format(id))
+        # cv2.imwrite(label_mask_save_path, label_mask)
 
         cv2.waitKey()

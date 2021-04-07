@@ -31,6 +31,7 @@ class Object3D(object):
         self.length = data[10]  # box length (in meters)
         self.t = (data[11], data[12], data[13])  # location (x,y,z) in camera coord.
         self.ry = data[14]  # yaw angle (around Y-axis in camera coordinates) [-pi..pi]
+        self.box3d_camera = data[8:15]
 
     def print_object(self):
         print('Type, truncation, occlusion, alpha: %s, %d, %d, %f' % \
@@ -454,7 +455,8 @@ def voxelize(point_cloud):
     for point_id, point in enumerate(quantized):
         point = point.astype(np.int32)
         voxel_grid[point[0], point[1], point[2]] = 1
-        reflectance_image[point[0], point[1]] += point[3]
+        # reflectance_image[point[0], point[1]] += point[3]
+        reflectance_image[point[0], point[1]] += prs[point_id]
         reflectance_count[point[0], point[1]] += 1
 
     # take average over reflection of xy position
@@ -466,6 +468,67 @@ def voxelize(point_cloud):
     return voxel_output
 
 
+########################
+# Voxelize Point Cloud density mode #
+########################
 
 
+def voxelize_density(point_cloud):
+    """
+    Transform a continuous point cloud into a discrete voxelized grid that serves as the network input
+    :param point_cloud: continuous point cloud | dim_0: all points, dim_1: [x, y, z, reflection]
+    :return: voxelized point cloud | shape: [INPUT_DIM_0, INPUT_DIM_1, INPUT_DIM_2]
+    """
+
+    # remove all points outside the pre-specified FOV
+    idx = np.where(point_cloud[:, 0] > VOX_X_MIN)
+    point_cloud = point_cloud[idx]
+    idx = np.where(point_cloud[:, 0] < VOX_X_MAX)
+    point_cloud = point_cloud[idx]
+    idx = np.where(point_cloud[:, 1] > VOX_Y_MIN)
+    point_cloud = point_cloud[idx]
+    idx = np.where(point_cloud[:, 1] < VOX_Y_MAX)
+    point_cloud = point_cloud[idx]
+    idx = np.where(point_cloud[:, 2] > VOX_Z_MIN)
+    point_cloud = point_cloud[idx]
+    idx = np.where(point_cloud[:, 2] < VOX_Z_MAX)
+    point_cloud = point_cloud[idx]
+
+    # create separate vectors for x, y, z coordinates and the reflectance value
+    pxs = point_cloud[:, 0]
+    pys = point_cloud[:, 1]
+    pzs = point_cloud[:, 2]
+    prs = point_cloud[:, 3]
+
+    # convert velodyne coordinates to voxel
+    qxs = (INPUT_DIM_0 - 1 - ((pxs - VOX_X_MIN) // VOX_X_DIVISION)).astype(np.int32)
+    qys = ((-pys - VOX_Y_MIN) // VOX_Y_DIVISION).astype(np.int32)
+    qzs = ((pzs - VOX_Z_MIN) // VOX_Z_DIVISION).astype(np.int32)
+
+    qxs_c = (INPUT_DIM_0 - 1 - qxs)* VOX_X_DIVISION +VOX_X_DIVISION/2.0
+    qys_c = VOX_Y_MAX - qys*VOX_Y_DIVISION - VOX_Y_DIVISION/2.0
+    qzs_c = VOX_Z_MIN + qzs*VOX_Z_DIVISION + VOX_Z_DIVISION/2.0
+
+    quantized = np.dstack((qxs, qys, qzs, prs, pxs, pys, pzs, qxs_c, qys_c, qzs_c)).squeeze()
+
+    # create empty voxel grid and reflectance image
+    voxel_grid = np.zeros(shape=(INPUT_DIM_0, INPUT_DIM_1, INPUT_DIM_2-1), dtype=np.float32)
+    reflectance_image = np.zeros(shape=(INPUT_DIM_0, INPUT_DIM_1), dtype=np.float32)
+    reflectance_count = np.zeros(shape=(INPUT_DIM_0, INPUT_DIM_1), dtype=np.float32)
+
+    # iterate over each point to fill occupancy grid and compute reflectance image
+    for point_id, point in enumerate(quantized):
+        point = point.astype(np.int32)
+        voxel_grid[point[0], point[1], point[2]] += (1-np.abs(point[4]-point[7]))*(1-np.abs(point[5]-point[8]))*(1-np.abs(point[6]-point[9]))
+        # reflectance_image[point[0], point[1]] += point[3]
+        reflectance_image[point[0], point[1]] += prs[point_id]
+        reflectance_count[point[0], point[1]] += 1
+
+    # take average over reflection of xy position
+    reflectance_count = np.where(reflectance_count == 0, 1, reflectance_count)
+    reflectance_image /= reflectance_count
+
+    voxel_output = np.dstack((voxel_grid, reflectance_image))
+
+    return voxel_output
 
