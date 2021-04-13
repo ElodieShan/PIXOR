@@ -38,30 +38,37 @@ class LoadPIXOR(nn.Module):
         }
         '''
         # forward pass
-        batch_predictions = self.model(batch_data)
+        batch_predictions = self.model(batch_dict["input"].unsqueeze(0))
             
         # convert network output to numpy for further processing
-        batch_predictions = np.transpose(batch_predictions.detach().cpu().numpy(), (0, 2, 3, 1))
-
+        batch_predictions_np = np.transpose(batch_predictions.detach().cpu().numpy(), (0, 2, 3, 1))
+        
         # get final bounding box predictions
-        final_box_predictions = process_predictions(batch_predictions, return_boxes=True)
-
-        point_cloud_ids = final_box_predictions[:,0]
-        final_class_predictions = final_box_predictions[:,1]
-        final_box_predictions = final_box_predictions[:,2:10] # nx8 corners 
-        final_bev_boxes_predictions = final_box_predictions[:,10:] # nx5 center_x\center_y\width\length\angle 
-        pred_dicts = {
-            "id": batch_id,
-            "final_box_predictions": final_box_predictions,
-            "cls_pred": final_class_predictions,
-            "boxes_pred": final_bev_boxes_predictions, 
-            # 'cls_pred': cls_pred,
-            # 'cls_targets': cls_targets,
-            # 'loc_pred': loc_pred,
-            # 'loc_targets': loc_targets,
-            # 'final_scores': scores
-        }
-        return pred_dicts
+        final_box_predictions = process_predictions(batch_predictions_np, return_boxes=True)
+        
+        if final_box_predictions is not None:
+            point_cloud_ids = final_box_predictions[:,0]
+            final_class_predictions = final_box_predictions[:,1]
+            final_loc_predictions = final_box_predictions[:,2:10] # nx8 corners 
+            final_bev_boxes_predictions = final_box_predictions[:,10:] # nx5 center_x\center_y\width\length\angle 
+            pred_dicts = {
+                "final_box_predictions": final_box_predictions,
+                "batch_predictions": batch_predictions.permute([0, 2, 3, 1]),
+                "cls_pred": final_class_predictions,
+                "loc_pred": final_loc_predictions, 
+                "bev_box_pred": final_bev_boxes_predictions, 
+                # 'final_scores': scores
+            }
+        else:
+            pred_dicts = {
+                "batch_predictions": batch_predictions.permute([0, 2, 3, 1]),
+                "final_box_predictions": None,
+                "cls_pred": None,
+                "loc_pred": None, 
+                # 'final_scores': scores
+            }
+        batch_dict.update(pred_dicts)
+        return batch_dict
 
 
 if __name__ == "__main__":
@@ -72,12 +79,12 @@ if __name__ == "__main__":
     print("Using device", device)
 
     n_epochs_trained = 17
-    model_dir = "20210403_ImageSets55_Ori_Model"
+    model_dir = "output_models/20210403_ImageSets55_Ori_Model"
     use_voxelize_density = False
     use_ImageSets = True
 
     # create PIXOR model
-    PIXOR = LoadPIXOR(device, n_epochs_trained=1, model_dir=model_dir, 
+    PIXOR = LoadPIXOR(device, n_epochs_trained=n_epochs_trained, model_dir=model_dir, 
                 use_voxelize_density=use_voxelize_density, use_ImageSets=use_ImageSets)
     
     # create data loader
@@ -85,22 +92,35 @@ if __name__ == "__main__":
     batch_size = 1
     data_loader = load_dataset(root=root_dir, batch_size=batch_size, device=device, test_set=True, \
             use_voxelize_density=use_voxelize_density, use_ImageSets=use_ImageSets, \
-            get_training_label_when_test=True)
+            attack_training_mode=True)
     print("Successfully get data_loader.. ")
 
     image_id = 10
     # voxel_point_cloud, labels, calib, training_labels = data_loader.dataset[image_id]
     # training label : np.cos(angle_rad), np.sin(angle_rad), -center_x_m+pixel_x, -center_y_m+pixel_y, np.log(width_m), np.log(length_m), label
-    for batch_id, (batch_data, batch_labels, batch_calib, training_labels) in enumerate(data_loader):
+    # for batch_id, (batch_data, batch_labels, batch_calib, training_labels) in enumerate(data_loader):
+    for i in tqdm(range(10)):
+        file_id = i%len(data_loader.dataset)
 
-        print("voxel_point_cloud:",batch_data.shape)
-        print("labels:",batch_labels)
-        print("calib:",batch_calib)
-        print("training_labels:",training_labels[training_labels.sum(dim=-1)>0]) 
-        print("batch_id:",batch_id)
-        if batch_id > 3:
+        voxel_point_cloud, labels, calib, training_labels = data_loader.dataset[file_id]
+
+        gt_boxes_lidar = []
+        for label in labels:
+            gt_boxes_lidar.append(label.box3d_lidar)
+
+        batch_dict = {
+            "id": file_id,
+            "voxel_point_cloud": voxel_point_cloud, # unsqueeze first dimension for batch
+            "gt_boxes": np.array(gt_boxes_lidar),
+            "cls_targets": training_labels[:, :, -1].detach().cpu().numpy(),
+            "loc_targets": training_labels[:, :, :-1].detach().cpu().numpy(),
+        }
+
+        pred_dict = PIXOR(batch_dict)
+        print(pred_dict.keys())
+        print(file_id)
+        if i > 5:
             break
-
     # input, label_map, image_id = model.train_loader.dataset[image_id]
     # points = model.train_loader.dataset.get_points(image_id)
     # scan = model.train_loader.dataset.get_top_view_maps(torch.from_numpy(points).to(device))

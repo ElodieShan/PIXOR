@@ -31,7 +31,9 @@ class Object3D(object):
         self.length = data[10]  # box length (in meters)
         self.t = (data[11], data[12], data[13])  # location (x,y,z) in camera coord.
         self.ry = data[14]  # yaw angle (around Y-axis in camera coordinates) [-pi..pi]
-        self.box3d_camera = data[8:15]
+        
+        self.box3d_camera = data[8:15] #elodie
+        self.box3d_lidar = None
 
     def print_object(self):
         print('Type, truncation, occlusion, alpha: %s, %d, %d, %f' % \
@@ -230,6 +232,27 @@ def compute_box_3d(label, P, scale=1.0):
     corners_2d = project_to_image(np.transpose(corners_3d), P)
     return corners_2d, np.transpose(corners_3d)
 
+
+###########################
+# Compute 3D Bounding Box in LiDAR Coor#
+###########################
+
+def compute_box_3d_lidar_coor(label, calib, scale=1.0):
+    """ Elodie
+    Takes an object and a projection matrix (P) and projects the 3d bounding box into the lidar plane.
+    :param label: 3d label object
+    :param calib: calib object
+    :param scale: scale the bounding box
+    :return: gt_boxes_lidar: (1,7) array in lidar coord.
+    """
+    boxes_camera = np.array([label.box3d_camera])
+    loc_lidar = calib.project_rect_to_velo(boxes_camera[:,3:6])
+    h, w, l = boxes_camera[:, 0:1], boxes_camera[:, 1:2], boxes_camera[:, 2:3]
+    loc_lidar[:, 2] += h[:, 0] / 2
+    rots = boxes_camera[:, 6:7]
+    gt_boxes_lidar = np.concatenate([loc_lidar, l, w, h, -(np.pi / 2 + rots)], axis=1)
+    label.box3d_lidar = gt_boxes_lidar[0]
+    return gt_boxes_lidar[0]
 
 #####################
 # Drawing Functions #

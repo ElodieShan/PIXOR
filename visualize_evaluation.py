@@ -124,7 +124,8 @@ if __name__ == '__main__':
     epoch = 17
     eval_mode = "PR_curve"  # "PR_curve" / "Iou"
     if eval_mode == "PR_curve":
-        eval_path = os.path.join("Eval", "eval_dict_epoch_{}.npz".format(epoch))
+        path="output_models/20210403_ImageSets55_Ori_Model/Eval"
+        eval_path = os.path.join(path, "eval_dict_epoch_{}.npz".format(epoch))
         eval_dict = np.load(eval_path, allow_pickle=True)['eval_dict'].item()
         # print("eval_dict:",eval_dict)
         for k,v in eval_dict.items():

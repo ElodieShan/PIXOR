@@ -75,7 +75,83 @@ def plot_points(points, figsize=(5, 5), color=None, psize=1, ax=None, axis='off'
         ax.set_title(title)
     return ax
 
+def plot_points_Vector3dVector(verts, figsize=(10,10), color=None, psize=0.2, ax=None, axis='off', facecolor='k', equal_axis=True, title=None, view=None):
+    # if type(points) == list:
+    #     for p in points:
+    #         ax = plot_points(p, figsize=figsize, color=color, psize=psize, ax=ax, alpha=None)
+    #     return ax
+    # if type(points) == torch.Tensor:
+    #     points = points.detach().cpu().numpy()
 
+    # if points.shape[-1] == 5:
+    #     points = points[..., 1:4]
+    # elif points.shape[-1] == 4:
+    #     points = points[..., :3]
+
+    # x = points[..., 0]
+    # y = points[..., 1]
+    # z = points[..., 2]
+
+    x, y, z = verts.clone().detach().cpu().unbind(1)  
+    # inds = (x >= -2).logical_and(x <= 5).logical_and(y <= 5).logical_and(z >= -8).logical_and(z <= 8)
+    # x = x[inds]
+    # y = y[inds]
+    # z = z[inds]
+
+    if ax is None:
+        fig = plt.figure(figsize=figsize)
+        ax = Axes3D(fig, facecolor=facecolor)
+        # ax.view_init(0,0)
+        ax.axis(axis)
+    if view is not None:
+        ax.view_init(view[0],view[1])
+    ax.scatter3D(y, x, z, s=psize, c=color, depthshade=False)
+    if equal_axis:
+        axisEqual3D(ax)
+
+    if title is not None:
+        ax.set_title(title)
+    return ax
+    
+def plot_points2(points, figsize=(10,10), color=None, psize=0.2, ax=None, axis='off', facecolor='k', equal_axis=True, title=None):
+    # if type(points) == list:
+    #     for p in points:
+    #         ax = plot_points(p, figsize=figsize, color=color, psize=psize, ax=ax, alpha=None)
+    #     return ax
+    # if type(points) == torch.Tensor:
+    #     points = points.detach().cpu().numpy()
+
+    # if points.shape[-1] == 5:
+    #     points = points[..., 1:4]
+    # elif points.shape[-1] == 4:
+    #     points = points[..., :3]
+
+    # x = points[..., 0]
+    # y = points[..., 1]
+    # z = points[..., 2]
+
+    x = points[..., 0]
+    y = points[..., 1]
+    z = points[..., 2]
+    inds = (x >= -2).logical_and(x <= 5).logical_and(y <= 5).logical_and(z >= -8).logical_and(z <= 8)
+    x = x[inds]
+    y = y[inds]
+    z = z[inds]
+
+    if ax is None:
+        fig = plt.figure(figsize=figsize)
+        ax = Axes3D(fig, facecolor=facecolor)
+        # ax.view_init(0,0)
+        ax.axis(axis)
+    ax.view_init(90,90)
+    ax.scatter3D(x, y, z, s=psize, c=color, depthshade=False)
+    if equal_axis:
+        axisEqual3D(ax)
+
+    if title is not None:
+        ax.set_title(title)
+    return ax
+    
 def plot_bbox(ax, bbox, linewidth=1, color=[0, 1, 0]):
     bbox = load.ts2np(bbox)
     corners3d = boxes_to_corners_3d(bbox)

@@ -133,7 +133,7 @@ class PointCloudDataset(Dataset):
     """
 
     def __init__(self, root_dir, split='training', device=torch.device('cpu'), show_times=True, get_image=False, \
-                        use_voxelize_density=False, use_ImageSets=False, get_training_label_when_test=False):
+                        use_voxelize_density=False, use_ImageSets=False, attack_training_mode=False):
         """
         Dataset for training and testing containing point cloud, calibration object and in case of training labels
         :param root_dir: root directory of the dataset
@@ -152,8 +152,8 @@ class PointCloudDataset(Dataset):
         # self.split_dir = os.path.join(root_dir, split)
         self.split_dir = os.path.join(root_dir, 'training')
         # self.LidarLib = ctypes.cdll.LoadLibrary('preprocess/LidarPreprocess.so')
-        self.get_training_label_when_test = get_training_label_when_test
-        print("get_training_label_when_test:",get_training_label_when_test)
+        self.attack_training_mode = attack_training_mode
+        print("attack_training_mode:",attack_training_mode)
 
         if self.use_ImageSets:
             if split == 'training':
@@ -290,6 +290,8 @@ class PointCloudDataset(Dataset):
                     # get pixel label for classification and BEV bounding box
                     regression_label, classification_label = compute_pixel_labels\
                         (regression_label, classification_label, label, bbox_corners_camera_coord)
+                    if self.attack_training_mode:
+                        gt_boxes_lidar = kitti_utils.compute_box_3d_lidar_coor(label, calib)
 
             # stack classification and regression label
             regression_label = torch.tensor(regression_label, device=self.device).float()
@@ -312,6 +314,8 @@ class PointCloudDataset(Dataset):
                 print('Voxelization Time: {:.4f} s'.format(voxelization_time))
                 print('Read Labels Time: {:.4f} s'.format(read_labels_time))
                 print('Compute Labels Time: {:.4f} s'.format(compute_label_time))
+            if self.attack_training_mode:
+                return voxel_point_cloud, labels, calib, training_label
             return voxel_point_cloud, training_label
     
 
@@ -319,8 +323,7 @@ class PointCloudDataset(Dataset):
             if self.get_image:
                 return image, voxel_point_cloud, labels, calib
             else:
-                if self.get_training_label_when_test:
-                    print("OK!")
+                if self.attack_training_mode:
                     # create empty pixel labels
                     regression_label = np.zeros((OUTPUT_DIM_0, OUTPUT_DIM_1, OUTPUT_DIM_REG))
                     classification_label = np.zeros((OUTPUT_DIM_0, OUTPUT_DIM_1, OUTPUT_DIM_CLA))
@@ -332,6 +335,8 @@ class PointCloudDataset(Dataset):
                             # get pixel label for classification and BEV bounding box
                             regression_label, classification_label = compute_pixel_labels\
                                 (regression_label, classification_label, label, bbox_corners_camera_coord)
+                            gt_boxes_lidar = kitti_utils.compute_box_3d_lidar_coor(label, calib)
+
                     # stack classification and regression label
                     regression_label = torch.tensor(regression_label, device=self.device).float()
                     classification_label = torch.tensor(classification_label, device=self.device).float()
@@ -367,7 +372,7 @@ class PointCloudDataset(Dataset):
 
 def load_dataset(root='Data/', batch_size=1, train_val_split=0.9, test_set=False,
                  device=torch.device('cpu'), show_times=False, \
-                 use_voxelize_density=False, use_ImageSets=False, get_training_label_when_test=False):
+                 use_voxelize_density=False, use_ImageSets=False, attack_training_mode=False):
     """
     Create a data loader that reads in the data from a directory of png-images
     :param device: device of the model
@@ -389,28 +394,33 @@ def load_dataset(root='Data/', batch_size=1, train_val_split=0.9, test_set=False
     if not test_set:
         # create customized dataset class
         dataset = PointCloudDataset(root_dir=root, device=device, split='training', show_times=show_times, \
-                            use_voxelize_density=use_voxelize_density, use_ImageSets=use_ImageSets)
+                            use_voxelize_density=use_voxelize_density, use_ImageSets=use_ImageSets, \
+                            attack_training_mode=attack_training_mode)
+        if not attack_training_mode:
+            # number of images used for training and validation
+            n_images = dataset.__len__()
+            n_train = int(train_val_split * n_images)
+            n_val = n_images - n_train
 
-        # number of images used for training and validation
-        n_images = dataset.__len__()
-        n_train = int(train_val_split * n_images)
-        n_val = n_images - n_train
+            # generated training and validation set
+            train_dataset, val_dataset = random_split(dataset, [n_train, n_val])
 
-        # generated training and validation set
-        train_dataset, val_dataset = random_split(dataset, [n_train, n_val])
+            # create data_loaders
+            data_loader = {
+                'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=my_collate_train,
+                                    num_workers=num_workers),
+                'val': DataLoader(val_dataset, batch_size=batch_size, shuffle=True, collate_fn=my_collate_train,
+                                num_workers=num_workers)
+            }
+        else:
+            data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=my_collate_test,
+                                 num_workers=num_workers)
 
-        # create data_loaders
-        data_loader = {
-            'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=my_collate_train,
-                                num_workers=num_workers),
-            'val': DataLoader(val_dataset, batch_size=batch_size, shuffle=True, collate_fn=my_collate_train,
-                              num_workers=num_workers)
-        }
     # create test set
     else:
 
         test_dataset = PointCloudDataset(root_dir=root, device=device, split='testing', \
-        use_voxelize_density=use_voxelize_density, use_ImageSets=use_ImageSets, get_training_label_when_test=get_training_label_when_test)
+        use_voxelize_density=use_voxelize_density, use_ImageSets=use_ImageSets, attack_training_mode=attack_training_mode)
         data_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=my_collate_test,
                                  num_workers=num_workers, drop_last=True)
 

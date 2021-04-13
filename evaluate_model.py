@@ -57,7 +57,7 @@ def process_regression_target(valid_reg_predictions, validity_mask, return_boxes
     point_cloud_box_predictions = corners + centers
     
     if return_boxes:
-        bev_boxes_predictions = np.hsatck((centers, width, length, prediction_angles))
+        bev_boxes_predictions = np.vstack((center_x[:,0],center_y[:,0], width, length, prediction_angles)).transpose(1,0)
         return point_cloud_box_predictions, bev_boxes_predictions
 
     return point_cloud_box_predictions
@@ -204,7 +204,7 @@ def process_predictions(batch_predictions, confidence_threshold=0.2, nms_thresho
         final_point_cloud_predictions = np.hstack((point_cloud_ids, final_class_predictions[:, np.newaxis],
                                                    final_box_predictions))
 
-        if final_bev_boxes_predictions is not None:
+        if return_boxes and final_bev_boxes_predictions is not None:
             final_point_cloud_predictions = np.hstack((final_point_cloud_predictions, final_bev_boxes_predictions))
 
         # stack final predictions for all point cloudss in batch

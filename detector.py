@@ -43,8 +43,9 @@ if __name__ == '__main__':
     in a BEV image and the original camera image.
     """
 
-    model_dir = "Ori_Model/"
-    det_res_save_dir = model_dir + "Images/Detections/"
+    model_dir = "output_models/20210403_ImageSets55_Ori_Model/"
+    det_res_save_dir = model_dir + "Images/"
+    n_epochs_trained = 17
     # root directory of the dataset
     root_dir = 'Data/'
 
@@ -59,7 +60,6 @@ if __name__ == '__main__':
 
     # create model
     pixor = PIXOR()
-    n_epochs_trained = 18
     pixor.load_state_dict(torch.load(model_dir + 'Models/PIXOR_Epoch_' + str(n_epochs_trained) + '.pt', map_location=device))
 
     # select index from dataset
@@ -143,4 +143,4 @@ if __name__ == '__main__':
 
         cv2.imwrite('{}detection_id_{:d}.png'.format(det_res_save_dir, id), bev_image)
         
-        # CUDA_VISIBLE_DEVICES=2 python3 detector.py
+        # CUDA_VISIBLE_DEVICES=4 python3 detector.py

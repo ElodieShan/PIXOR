@@ -14,3 +14,7 @@ __pycache__/PIXOR_Net.cpython-36.pyc
 __pycache__/show_gt.cpython-36.pyc
 Metrics/.DS_Store
 Models/.DS_Store
+*.pkl
+*.png
+output_models/.DS_Store
+output_models
